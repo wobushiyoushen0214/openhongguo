@@ -189,6 +189,20 @@ var methods = map[string]method{
 		}
 		return playbackResult{Playback: pb}, nil
 	}),
+	"resolvePlaybackMulti": oneString(func(ctx context.Context, c *sdk.Client, id string) (any, error) {
+		pb, err := c.ResolvePlaybackMulti(ctx, id, sdk.PlaybackOptions{})
+		if errors.Is(err, sdk.ErrDRMProtected) && pb != nil {
+			key, kerr := sdk.ContentKey(pb)
+			if kerr != nil {
+				return playbackResult{Playback: pb, ContentKeyError: Error(kerr)}, nil
+			}
+			return playbackResult{Playback: pb, ContentKey: &key}, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		return playbackResult{Playback: pb}, nil
+	}),
 	"resetDevice": func(ctx context.Context, c *sdk.Client, _ []json.RawMessage) (any, error) {
 		return nil, c.ResetDevice(ctx)
 	},

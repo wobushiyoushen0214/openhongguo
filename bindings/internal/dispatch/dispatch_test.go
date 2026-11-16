@@ -3,7 +3,11 @@ package dispatch_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/beilunyang/openhongguo/adapters/httptransport"
@@ -163,3 +167,76 @@ func TestDeviceResetsPassesThrough(t *testing.T) {
 		}
 	}
 }
+
+// 批量入口必须取请求分集的桶，并保留签名、请求体与明确错误。
+func TestMultiPlaybackSelectsRequestedBucket(t *testing.T) {
+	const id = "7100000000000201"
+	const video = `{"status":10,"video_list":{"540p":{"main_url":"https://media.invalid/540.mp4","video_meta":{"definition":"540p","vheight":960}}}}`
+	for _, tc := range []struct {
+		name, body string
+		status     int
+		expected   error
+	}{
+		{"对象模型", `{"code":0,"data":{"7100000000000202":{"video_model":null},"` + id + `":{"video_model":` + video + `}}}`, 200, nil},
+		{"字符串模型", `{"code":0,"data":{"` + id + `":{"video_model":` + strconvQuote(video) + `}}}`, 200, nil},
+		{"缺请求桶", `{"code":0,"data":{"7100000000000202":{"video_model":` + video + `}}}`, 200, sdk.ErrContentUnavailable},
+		{"空响应", "", 200, sdk.ErrAnonymousLimited},
+		{"登录拒绝", "", 403, sdk.ErrAuthenticationRequired},
+		{"限流", "", 429, sdk.ErrRateLimited},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hits := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/service/2/device_register/" {
+					w.Header().Set("Set-Cookie", "ttreq=fixture-ticket; Path=/")
+					io.WriteString(w, `{"device_id_str":"7100000000000001","install_id_str":"7100000000000002"}`)
+					return
+				}
+				hits++
+				if r.URL.Path != "/novel/player/multi_video_model/v1/" || r.Method != "POST" {
+					t.Errorf("请求路径或方法错误")
+				}
+				raw, _ := io.ReadAll(r.Body)
+				var body struct {
+					IDs map[string][]string `json:"mixed_video_id_map"`
+				}
+				json.Unmarshal(raw, &body)
+				if strings.Join(body.IDs["1004"], ",") != id {
+					t.Errorf("请求分集不一致")
+				}
+				if len(r.Header.Get("X-Argus")) < 100 || r.Header.Get("X-Medusa") != "" {
+					t.Errorf("批量签名错误")
+				}
+				w.WriteHeader(tc.status)
+				io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+			c, createErr := sdk.NewClient(sdk.Options{Transport: httptransport.New(), ProfileStore: memstore.New(), APIOrigin: srv.URL, RegisterOrigin: srv.URL, RetryAttempts: 1, DeviceResets: sdk.Int(0)})
+			if createErr != nil {
+				t.Fatal(createErr)
+			}
+			var pb struct {
+				Playback struct {
+					EpisodeID string `json:"episode_id"`
+					Streams   []struct {
+						URL string `json:"url"`
+					} `json:"streams"`
+				} `json:"playback"`
+			}
+			err := call(t, c, "resolvePlaybackMulti", `["`+id+`"]`, &pb)
+			if tc.expected != nil {
+				if !errors.Is(err, tc.expected) {
+					t.Fatalf("错误分类不一致：%v", err)
+				}
+			} else {
+				if err != nil || len(pb.Playback.Streams) != 1 || pb.Playback.Streams[0].URL != "https://media.invalid/540.mp4" {
+					t.Fatalf("请求模型不一致：%+v，%v", pb, err)
+				}
+			}
+			if hits != 1 {
+				t.Fatalf("批量接口只能请求一次，实际%d", hits)
+			}
+		})
+	}
+}
+func strconvQuote(s string) string { b, _ := json.Marshal(s); return string(b) }

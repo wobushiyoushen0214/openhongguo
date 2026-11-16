@@ -202,6 +202,16 @@ class OpenhongguoClient internal constructor(private val engine: Engine) {
         )
     }
 
+    /** 兼容批量接口：按指定分集桶解析，结果与单集模型一致。 */
+    suspend fun resolvePlaybackMulti(episodeId: String): PlaybackResult {
+        val o = call("resolvePlaybackMulti", episodeId).asObject()
+        return PlaybackResult(
+            playback = Playback.fromJson(o.opt("playback").asObject()),
+            contentKey = (o.opt("contentKey") as? JSONObject)?.let(ContentKey::fromJson),
+            contentKeyError = (o.opt("contentKeyError") as? JSONObject)?.let(OpenhongguoException::fromJson),
+        )
+    }
+
     /** 丢弃当前匿名设备，下次请求时重新注册。 */
     suspend fun resetDevice() {
         call("resetDevice")

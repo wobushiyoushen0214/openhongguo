@@ -2,6 +2,7 @@ package sdk
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/beilunyang/openhongguo/internal/drm"
@@ -74,4 +75,59 @@ func ContentKey(pb *model.Playback) (model.ContentKey, error) {
 		return model.ContentKey{}, fmt.Errorf("%w: %v", ErrDRMProtected, err)
 	}
 	return model.ContentKey{Hex: k.Hex, Version: k.Version}, nil
+}
+
+// ResolvePlaybackMulti 请求兼容批量接口，一次只取指定分集，复用单集的签名及模型解析。
+func (c *Client) ResolvePlaybackMulti(ctx context.Context, episodeID string, _ PlaybackOptions) (*model.Playback, error) {
+	return withFreshDevice(ctx, c, true, func(ctx context.Context) (*model.Playback, error) {
+		if !validID(episodeID) {
+			return nil, fmt.Errorf("invalid episode ID")
+		}
+		p, err := c.ensureSearchGuest(ctx)
+		if err != nil {
+			return nil, err
+		}
+		body, err := json.Marshal(map[string]any{
+			"mixed_video_id_map": map[string]any{"1004": []string{episodeID}},
+			"dr_scene":           "player",
+			"biz_param": map[string]any{"detail_page_version": 0, "device_level": 3,
+				"disable_digg_stat": false, "disable_video_relate_book": false,
+				"need_all_video_definition": true, "need_mp4_align": false,
+				"use_os_player": false, "use_server_dns": false, "video_platform": 1024},
+		})
+		if err != nil {
+			return nil, err
+		}
+		const path = "/novel/player/multi_video_model/v1/"
+		ticket := c.clock().UnixMilli()
+		rawQuery, headers := sign.SignPlaybackPOST(path, protocol.DeviceQueryPairs(c.identity(p)), ticket, p.DeviceID, protocol.VersionName, body, nil)
+		raw, _, err := c.doRaw(ctx, "POST", c.apiOrigin+path+"?"+rawQuery, anonymousHeaders(c, p, ticket, headers), body)
+		if err != nil {
+			return nil, err
+		}
+		var env struct {
+			Code json.RawMessage            `json:"code"`
+			Data map[string]json.RawMessage `json:"data"`
+		}
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return nil, err
+		}
+		row, ok := env.Data[episodeID]
+		if !ok {
+			return nil, ErrContentUnavailable
+		}
+		// 只解包指定分集；缺桶或模型错误不能用其他分集代替。
+		single, err := json.Marshal(map[string]json.RawMessage{"code": env.Code, "data": row})
+		if err != nil {
+			return nil, err
+		}
+		playback, err := protocol.ParsePlayback(single, episodeID)
+		if err != nil {
+			return nil, err
+		}
+		if playback.Protected {
+			return playback, ErrDRMProtected
+		}
+		return playback, nil
+	})
 }

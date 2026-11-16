@@ -108,6 +108,36 @@ class ClientTest {
     }
 
     @Test
+    fun resolvePlaybackMultiEncodesRequestedEpisodeAndKeepsKeyResults() = runBlocking {
+        for (keyFails in listOf(false, true)) {
+            val engine = FakeEngine { _, _ ->
+                val result = JSONObject().put("playback", JSONObject()
+                    .put("episode_id", "9").put("protected", true)
+                    .put("streams", JSONArray().put(JSONObject().put("definition", "720p"))))
+                if (keyFails) {
+                    result.put("contentKeyError", JSONObject().put("code", "DRM_PROTECTED").put("message", "密钥无效"))
+                } else {
+                    result.put("contentKey", JSONObject().put("key", "00112233445566778899aabbccddeeff").put("version", "1"))
+                }
+                ok(result)
+            }
+            val result = OpenhongguoClient(engine).resolvePlaybackMulti("9")
+            assertEquals("resolvePlaybackMulti" to "[\"9\"]", engine.calls.single())
+            assertEquals("9", result.playback.episodeId)
+            assertTrue(result.playback.protected)
+            assertEquals("720p", result.playback.streams.single().definition)
+            if (keyFails) {
+                assertNull(result.contentKey)
+                assertEquals(ErrorCode.DRM_PROTECTED, result.contentKeyError?.code)
+            } else {
+                assertEquals("00112233445566778899aabbccddeeff", result.contentKey?.key)
+                assertEquals("1", result.contentKey?.version)
+                assertNull(result.contentKeyError)
+            }
+        }
+    }
+
+    @Test
     fun cancellingTheCoroutineCancelsTheCall() = runBlocking {
         val cancelled = CompletableDeferred<Unit>()
         val engine = Engine { _, _, _ -> { cancelled.complete(Unit) } }
